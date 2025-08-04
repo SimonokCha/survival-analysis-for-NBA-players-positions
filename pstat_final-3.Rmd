@@ -1,0 +1,553 @@
+---
+title: "PSTAT 175 Final Project"
+author: "Kevin Zhang, Seungmin Cha, Dongchi Xue"
+date: "2025-05-12"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+
+Professional basketball is known to have some of the most physically intensive demands of its players.
+While some athletes enjoy long, decorated careers, others leave the league after only a few seasons.
+Understanding what factors influence the length of a professional's career is important for teams managing their rosters, as well as players planning their future.
+
+This project aims to examine the career longevity of professional basketball players in the NBA.
+The dataset used for our analysis came from \hyperlink{ref1}{Parks (2021)}, which sourced the original data from \hyperlink{ref2}{“Basketball Reference” (2025)}.
+The dataset provides career and personal information for each player, from as early as 1947, to the present year, 2025.
+The main scientific question we are interested in answering is:\
+
+**How does a player’s primary position (Guard, Forward, Center) affect their professional career length in the NBA?**\
+
+To answer this, we consider career length as a time-to-event variable where the event of interest is a player's retirement.
+Players who are still active at the time of data collection are considered censored observations.
+By utilizing survival analysis methods to model and compare career duration across positions while properly accounting for censored data, we will attain insight into whether certain positions are associated with longer or shorter careers.
+
+The specific covariates in the dataset are:
+
+\textbullet **name:** Full name of the player.\
+\textbullet **start_year, end_year:** Career start and end years.\
+\textbullet **career_length:** Number of years played (outcome variable).\
+\textbullet **positions:** Playing position(s) (e.g., “G”, “F”, “C”, or combinations).\
+\textbullet **status:** Whether the player has retired (TRUE) or is still active (FALSE).
+True is uncensored data, False is censored data.\
+\textbullet **height, weight:** Physical attributes.
+Height is recorded in inches and weight is recorded in pounds.\
+\textbullet **birth_date:** Date of birth.\
+\textbullet **sport:** All rows are “Basketball”.
+
+\newpage
+
+### 1.1 Reading in Packages
+
+```{r, message=FALSE}
+library(readr)
+library(survival)
+library(survminer)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+library(splines)
+```
+
+### 1.2 The Dataset
+
+```{r, message=FALSE, warning=FALSE}
+# Load the basketball career dataset
+basketball_df <- read.csv("~/Desktop/PSTAT 175/archive/basketball_career_length.csv")
+
+# Add calculated variables: career_length if missing, birth year, and start age
+basketball_df <- basketball_df %>%
+  mutate(
+    career_length = ifelse(is.na(career_length),
+                           end_year - start_year + 1,  # If career_length is missing, calculate it
+                           career_length),
+    birth_year = year(as.Date(birth_date, format="%B %d, %Y")),  # Extract birth year
+    start_age = start_year - birth_year                          # Calculate age at career start
+  )
+
+# Convert character variables to factors for modeling purposes
+basketball_df$positions <- as.factor(basketball_df$positions)
+basketball_df$hall_of_fame <- as.factor(basketball_df$hall_of_fame)
+
+# Create a simplified primary position variable and remove incomplete cases
+basketball_df <- basketball_df %>%
+  mutate(
+    position_primary = case_when(
+      grepl("G", positions) ~ "Guard",
+      grepl("F", positions) ~ "Forward",
+      grepl("C", positions) ~ "Center",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(career_length) & !is.na(position_primary))  # Remove rows with missing values
+basketball_df$position_primary <- as.factor(basketball_df$position_primary)
+
+```
+
+-   Missing `career_length` values are filled by subtracting `start_year` from `end_year`.\
+-   `position_primary` reduces multi-role positions to a primary role for simpler analysis.\
+-   Final cleaned dataset is ready for survival analysis.
+
+```{r, warning=FALSE}
+basketball_df$status <- basketball_df$status == "True"
+# Fit Kaplan-Meier model by player position
+position_fit <- survfit(Surv(career_length, status) ~ position_primary, data = basketball_df)
+
+# Plot Kaplan-Meier survival curves
+ggsurvplot(position_fit, 
+            legend.title = "Position", 
+            conf.int = TRUE, 
+            surv.median.line = "hv") + 
+  labs(x = "Career Length (years)", 
+       y = "Survival Probability", 
+       title = "Kaplan-Meier Survival for NBA Player Careers By Primary Position")
+```
+
+-   Guards have the steepest decline in survival probability, indicating shorter careers.\
+-   Centers show the longest career durations.\
+-   Confidence intervals show more uncertainty after 10+ years, as fewer players remain.
+
+```{r}
+summary(basketball_df)
+```
+
+-   Sample size: 4628 players.\
+-   Median career length: 5 years.\
+-   Median starting age: 23 years.\
+-   Height ranges from 70 to 86 inches; weight ranges from 137 to 280 lbs.\
+
+\newpage
+
+# 2. Model Fitting
+
+### 2.1 Cox Proportional Hazards Model
+
+```{r}
+min(basketball_df$start_year)
+
+basketball_df$start_year1 <- basketball_df$start_year - 1947
+
+full_cox_model <- coxph(Surv(career_length, status) ~ 
+                       height + 
+                       weight + 
+                       start_age + 
+                       start_year1 * position_primary, 
+                     data = basketball_df)
+
+summary(full_cox_model)
+anova(full_cox_model)
+```
+
+
+### 2.2 Forward Stepwise Selection
+
+```{r, warning=FALSE}
+# Null model with only position as a predictor (Baseline model)
+null_model <- coxph(Surv(career_length, status) ~ position_primary, data = basketball_df)
+AIC(null_model) 
+```
+In the final Cox model, several factors significantly affect career length:
+
+`Start Age (HR = 1.208)`: Older rookies retire sooner; each extra year of age increases risk by ~21%.
+
+`Height (HR = 0.9516)`: Taller players have longer careers. Each inch reduces risk by 4.8%.
+
+`Weight (HR = 1.0038)`: Slightly higher hazard; not practically large.
+
+`Forwards`: HR = 8.33 → ~8x more likely to retire than Centers.
+
+`Guards`: HR = 2.32 → ~2.3x more likely to retire than Centers.
+
+`Time Trends`: Players who started recently (higher start_year1) have shorter careers, but:  
+- Forwards’ risk declined over time (interaction HR = 0.963). 
+- Guards also improved (interaction HR = 0.979)
+
+Model Fit: Concordance = 0.684 → moderate predictive ability.  
+
+-   AIC (Akaike Information Criterion) for the null model is **59050.07**.\
+-   Lower AIC values indicate better model fit.
+
+```{r, warning=FALSE}
+# Single Covariate Models
+model1 <- coxph(Surv(career_length, status) ~ start_year1 * position_primary, data=basketball_df)
+model2 <- coxph(Surv(career_length, status) ~ height, data=basketball_df)
+model3 <- coxph(Surv(career_length, status) ~ weight, data=basketball_df)
+model4 <- coxph(Surv(career_length, status) ~ start_age, data=basketball_df)
+
+AIC(model1, model2, model3, model4) # model4 AIC is 57989.49
+```
+
+-   `model4` (start_age) has the lowest AIC of **57989.49**, making it the best single predictor at this stage.\
+-   `start_age` is a strong indicator of career length.
+
+```{r}
+# Adding a Second Covariate 
+model4.1 <- coxph(Surv(career_length, status) ~ 
+                  start_age + start_year1 * position_primary, data=basketball_df)
+model4.2 <- coxph(Surv(career_length, status) ~ 
+                  start_age + height, data=basketball_df)
+model4.3 <- coxph(Surv(career_length, status) ~ 
+                  start_age + weight, data=basketball_df)
+
+AIC(model4.1, model4.2, model4.3) # model4.1 AIC is 57479.99
+```
+
+-   `model4.1` (start_age + start_year) has the lowest AIC **57479.99**.\
+-   Adding `start_year` significantly improves the model fit.
+
+```{r, echo = FALSE}
+# Addign a Third Covariate
+model4.1.1 <- coxph(Surv(career_length, status) ~ 
+                  start_age + start_year1 * position_primary + height, data=basketball_df)
+model4.1.2 <- coxph(Surv(career_length, status) ~ 
+                  start_age + start_year1 * position_primary + weight, data=basketball_df)
+
+AIC(model4.1.1, model4.1.2) # model4.1.1 AIC is 57463.77	
+```
+
+```{r, echo = FALSE}
+# Adding a Fourth Covariate
+model4.1.2.1 <- coxph(Surv(career_length, status) ~ 
+                  start_age + start_year1 * position_primary + weight + height, data=basketball_df)
+
+AIC(model4.1.2.1) # model 4.1.2.1 AIC is 57456.53
+```
+
+We continued the stepwise model building process in the same manner, testing all available covariates sequentially and selecting the model with the lower AIC.
+Ultimately, we ended up including all initial covariates to the final model.
+
+```{r}
+# Final Model Including Player Position
+full_model <- coxph(Surv(career_length, status) ~ 
+                  start_age + start_year1 * position_primary + weight + height,
+                  data=basketball_df)
+summary(full_model)
+```
+
+**Significant Factors:**\
+`height`: HR = 0.95 → Taller players have slightly longer careers.\
+`weight`: HR = 1.0038 → Heavier players have slightly shorter careers.\
+`start_age`: HR = 1.21 → Players who begin their careers at an older age are more likely to retire sooner.\
+`start_year1`: HR = 1.01 → Players who started their careers more recently tend to have slightly shorter careers.\
+`position_primaryForward`: HR = 8.33 → Forwards have a significantly higher hazard compared to Centers, indicating notably shorter careers.\
+`position_primaryGuard`: HR = 2.32 → Guards also have shorter careers than Centers, though less extreme than Forwards.\
+`start_year1:position_primaryForward`: HR = 0.96 → The negative effect of being a Forward has slightly decreased in more recent starting years.\
+`start_year1:position_primaryGuard`: HR = 0.98 → Similarly, the career hazard for Guards has modestly declined over time.
+
+**Final Model Selection:**.
+After evaluating combinations of all available covariates, the final model included:\
+`start_age` + `start_year1` \* `position_primary` + `weight` + `height`.
+This model achieved the lowest AIC and balanced complexity with explanatory power.
+
+**Model Performance:**.
+`Concordance = 0.684` → Indicates reasonable predictive accuracy.\
+`Likelihood ratio`, `Wald`, and `Score tests` all returned p \< 0.001, confirming the overall statistical significance and strength of the model.
+
+\newpage
+
+# 3. Check Proportional Hazards Assumptions.
+
+```{r}
+# visual Check: Log-Log Plot by position
+position_fit %>% 
+  ggsurvplot(fun="cloglog") +
+  labs(title = "Log-Log Plot by Position")
+```
+
+The curves for `Guard`, `Forward`, and `Center` clearly diverge and cross each other.
+This indicates a violation of the PH assumption for the `position_primary` variable.
+Thus, player position does not satisfy the proportional hazards assumption.
+The effect of position on career length changes over time.
+
+```{r}
+cox.zph(full_model)
+```
+
+`p < 0.05` -\> Evidence of violation of the PH assumption for that covariate.
+
+**Variables violating PH assumption**:\
+`start_age` (p = 0.00464).
+`height` (p = 0.00021).
+`position_primary` (p \< 0.001).
+
+**Variables not violating PH**:\
+`weight` (p = 0.39249).
+
+```{r}
+# Residual Plot Analysis
+par(mfrow = c(2, 2))
+par(mar = c(4, 4, 2, 1))
+
+plot(cox.zph(full_model))
+```
+
+**start_age Plot**:\
+- Beta(t) values fluctuate significantly over time, indicating non-constant effect of starting age.\
+- Early career years have a different risk impact compared to later years.
+
+**weight Plot**:\
+- Relatively flat, confirming no significant violation of PH for weight.
+
+**height Plot**:\
+- Beta(t) values vary, suggesting the effect of height on survival probability changes over time.
+
+**position_primary Plot**:\
+- Major fluctuations over time.\
+- Clear evidence that the impact of playing position on career duration is not constant throughout a career.
+
+\newpage
+
+# 4. Advanced Method
+
+## Time-Split
+
+In order to solve the violation of the Cox Proportional Hazard model, the time-split model is used to allow the effect of the main position change over time.
+
+```{r}
+# Split data by cut time = 2
+basketball.split2 <- survSplit(Surv(career_length, status) ~ start_year1 +
+                       height + 
+                       weight + 
+                       start_age + 
+                       position_primary, 
+                     data = basketball_df,
+                          cut = 2 , id = "ID", episode = "Episode"
+                          )
+
+# Split data by cut time = 2,11
+basketball.split211 <- survSplit(Surv(career_length, status) ~ start_year1 +
+                       height + 
+                       weight + 
+                       start_age + 
+                       position_primary, 
+                     data = basketball_df,
+                          cut = c(2,11) , id = "ID", episode = "Episode"
+                          )
+
+full_model_2 <- coxph(
+  Surv(tstart, career_length, status) ~
+    start_age + start_year1 + weight + height +
+     position_primary * strata(Episode) + start_year1:position_primary,                   
+    data = basketball.split2                           
+)
+
+full_model_211 <- coxph(
+  Surv(tstart, career_length, status) ~
+    start_age + start_year1 + weight + height +
+     position_primary * strata(Episode) + start_year1:position_primary,                   
+    data = basketball.split211                          
+)
+
+AIC(full_model_2,full_model_211) #Lowest: full_model_211. AIC is 57334.00
+```
+
+**Time-split justification:** Based on the b(t) plot for position_primary, we observe a downward slope between time 0 to 2.
+Starting from t = 2, we observe a slightly smooth increasing curve until time = 11.
+Therefore, we decide to test cut time of 2 and another model with cut times are set at 2 and 11.
+
+After we compare AIC between two models, `full_model_211` with cut times of 2 and 11 shows a better fit.
+
+## Cox PH models with non-linear functions of the covariates
+
+```{r}
+# Fit a model with a non-linear relationship with start year and career length.
+
+# Spline-based 
+full_model_ns <- coxph(
+  Surv(tstart, career_length, status) ~
+    start_age  + ns(start_year1, df = 2) + weight + height+ 
+    position_primary * strata(Episode)+ 
+    ns(start_year1, df = 2):position_primary,
+    data = basketball.split211
+  )
+# Set df = 2 since estimates of interaction term explode if we use df = 3
+AIC(full_model_211, full_model_ns)
+
+# AIC full_model_ns is lowest
+```
+
+-   full_model_ns has a lower `AIC` of 57231 compared to linear model.
+
+```{r}
+# Final Advanced Model:
+summary(full_model_ns)
+anova(full_model_ns)
+```
+
+**Significant Factors (Advanced Model):**
+
+-   `start_age`: HR = 1.196 (95% CI: 1.176–1.216, p \< 0.001) → Older starting age is associated with 19.6% higher hazard (shorter careers).
+
+-   `height`: HR = 0.975 (95% CI: 0.956–0.994, p = 0.012) → Each additional inch in height reduces hazard by 2.5% (longer careers for taller players).
+
+-   `weight`: HR = 1.001 (95% CI: 0.998–1.003, p = 0.620) → Weight shows no significant effect after adjusting for other variables.
+
+**Nonlinear Effects of Start Year (`ns(start_year1, df=2)`):**
+
+-   `ns(start_year1, df=2)1`: HR = 171.63 (p \< 0.001)\
+    → Extreme early-career hazard for certain start years (likely due to spline boundary knot effects).
+
+-   `ns(start_year1, df=2)2`: HR = 0.382 (p \< 0.001)\
+    → Later start years show **61.8% lower hazard** (nonlinear trend).
+
+**Interaction term: `ns(start_year):position_primary`**
+
+-   `Forward`:
+
+    -   Spline Term 1: HR = 0.0004 (p \< 0.001) → **Extreme risk reduction for early-career Forwards**.
+
+    -   Spline Term 2: HR = 0.844 (p = 0.519) → No significant nonlinearity.
+
+-   `Guard`:
+
+    -   Spline Term 1: HR = 0.001 (p \< 0.001) → **Extreme risk reduction for early-career Guards**.
+
+    -   Spline Term 2: HR = 2.78 (p \< 0.001) → **178% higher hazard for late-career Guards**.
+
+**Base Hazards (Episode=1)**:
+
+-   `Forward`: HR = 44.59 (vs. Center, p \< 0.001) → **Forwards have 44.6x higher baseline hazard**.
+
+-   `Guard`: HR = 12.65 (vs. Center, p \< 0.001) → **Guards have 12.7x higher baseline hazard**.
+
+**Time-Stratified Interactions (`strata(Episode)`):**
+
+-   `Forward:Episode=2`: HR = 1.28 (p = 0.037) → **27.7% higher hazard in mid-career (2–11 years)**.
+
+-   `Guard:Episode=2`: HR = 1.89 (p \< 0.001) → **88.9% higher hazard in mid-career**.
+
+-   `Forward:Episode=3`: HR = 4.05 (p \< 0.001) → **305% higher hazard in late career (\>11 years)**.
+
+-   `Guard:Episode=3`: HR = 11.18 (p \< 0.001) → **1018% higher hazard in late career**.
+
+**Model Performance:**\
+`Concordance` = 0.702 (Improved from previous model).
+`Likelihood ratio test` = 1469 on 15 df, p \< 2e-16.
+`Wald test` = 1652 on 15 df, p \< 2e-16.
+`Score test` = 1847 on 15 df, p \< 2e-16.
+
+The advanced model improves interpretability over different career phases and partially addresses PH assumption violations by introducing time-stratified effects. While some covariates still show evidence of non-proportional hazards, the stratified model captures key temporal dynamics in how player position and career timing affect longevity.
+
+```{r}
+# check Proportional Hazard Assumption
+cox.zph(full_model_ns)
+par(mfrow = c(2, 2))
+par(mar = c(4, 4, 2, 1))
+plot(cox.zph(full_model_ns))
+```
+
+**Interpretation of Plots:**.\
+`start_age`: The plot shows noticeable fluctuations in beta(t), especially in early time periods.
+This suggests the effect of age at career start is not constant over time.\
+`start_year1`: The slope deviates from zero, indicating that the effect of debut year changes during a player's career.\
+`position_primary`: The beta(t) line varies and crosses over time, confirming that the effect of player position violates the PH assumption.\
+`weight`: Although significant in the test, the plot shows some mild deviations from flatness; this may be due to the large sample size amplifying small effects.\
+`height`: The beta(t) line is relatively flat, suggesting that height has a constant effect over time.\
+`start_year1:position_primary`: Shows mild deviations, but the test result (p = 0.08327) suggests no strong violation.\
+`position_primary:Episode`: The effect of position varies across episodes, which is expected given the interaction.
+The violation is due to meaningful changes in hazard over different career stages.
+
+*While the advanced model improves flexibility and incorporates time-varying effects via stratification and interactions, some covariates (especially `start_age`, `start_year1`, and `position_primary`) continue to exhibit non-proportional behavior. Nevertheless, the stratified framework allows us to capture key dynamic effects and improves interpretability across career phases.*
+
+### Plot HR vs Start Year by Position
+```{r, warning=FALSE}
+# Fit the model (no strata version)
+model_no_strata <- coxph(
+  Surv(tstart, career_length, status) ~
+    start_age + ns(start_year1, df = 2) + weight + height +
+    position_primary + ns(start_year1, df = 2):position_primary,
+  data = basketball.split211
+)
+
+# Create prediction grid
+pred_grid <- expand.grid(
+  start_age = mean(basketball.split211$start_age, na.rm = TRUE),
+  start_year1 = seq(min(basketball.split211$start_year1), max(basketball.split211$start_year1), by = 1),
+  position_primary = c("Center", "Forward", "Guard"),
+  weight = mean(basketball.split211$weight, na.rm = TRUE),
+  height = mean(basketball.split211$height, na.rm = TRUE)
+)
+
+# Match factor levels
+pred_grid$position_primary <- factor(pred_grid$position_primary,
+                                     levels = levels(basketball.split211$position_primary))
+
+# Predict linear predictor and compute HR
+pred_grid$lp <- predict(model_no_strata, newdata = pred_grid, type = "lp")
+pred_grid$HR <- exp(pred_grid$lp)
+pred_grid$start_year <- pred_grid$start_year1 + 1947
+
+# Plot
+ggplot(pred_grid, aes(x = start_year, y = HR, color = position_primary)) +
+  geom_line(size = 1.2) +
+  labs(title = "Hazard Ratio over Time by Position",
+       x = "Start Year", y = "Hazard Ratio (HR)", color = "Position") +
+  theme_minimal()
+```
+
+
+This plot illustrates how the risk of career end changes over time for each position:  
+`Forwards` show the steepest drop in hazard, indicating greatly improved longevity since the 1970s.
+
+`Guards` maintain a moderate but steady decline in hazard.
+
+Centers show a temporary peak in risk around 2000, followed by recovery.
+Overall, the model captures meaningful non-linear trends in how position and start year interact to affect career duration.
+\newpage
+
+# 5. Conclusion
+
+```{r}
+summary(full_model)
+```
+
+**Key Findings from the Final Cox Model:**\
+The final model included start_age, start_year1, position_primary, height, and weight, along with interaction terms between start_year1 and position_primary.
+
+`Start Age` (HR = 1.2083, 95% CI: [1.1885, 1.2285]).\
+- Each additional year in starting age increases the hazard of retirement by approximately 21%.\
+- This confirms that players who debut later tend to have shorter careers.\
+`Height` (HR = 0.9516, 95% CI: [0.9339, 0.9695]).\
+- Taller players have a lower risk of retirement, implying longer career spans.\
+`Weight` (HR = 1.0038, 95% CI: [1.0014, 1.0063])\
+- Heavier players show a slightly increased hazard of career end.
+
+**Position Effects (compared to Centers):**\
+`Forwards`: HR = 8.3251, 95% CI: [5.9058, 11.7357].\
+- Substantially higher risk of retirement, indicating shorter careers.\
+`Guards`: HR = 2.3197, 95% CI: [1.6244, 3.3126]\
+- Also significantly shorter careers than Centers.
+
+**Time Trend Effects:**.\
+`start_year1` (HR = 1.0123, 95% CI: [1.0065, 1.0182])\
+- Players starting in more recent years have slightly shorter careers.
+
+**Interaction Terms:**.\
+`start_year1 * Forward`: HR = 0.9634, 95% CI: [0.9573, 0.9696]\
+`start_year1 * Guard`: HR = 0.9786, 95% CI: [0.9725, 0.9847].\
+- These interactions suggest that the career disadvantage for Guards and Forwards has decreased modestly in recent decades.
+
+**Model Performance:**.\
+Concordance = 0.684 (SE = 0.005).\
+- Indicates moderate predictive accuracy of the model.\
+Likelihood Ratio Test = 1230 on 8 df, p \< 2e-16.\
+Wald Test = 1421 on 8 df, p \< 2e-16.\
+Score Test = 1427 on 8 df, p \< 2e-16\
+- These metrics confirm strong overall model fit.
+
+**The Cox model shows that `age`, `position`, and `start_year` strongly impact NBA career length. Forwards and Guards face much higher risks of early exit, though recent players show improving trends. Stratified models and splines better capture non-proportional effects. These findings support tailored career planning by position and debut timing.**
+\newpage
+
+# 6. References
+
+\hypertarget{ref1}{Parks, Kevin (2021). \textit{Athlete Career Length Dataset}. Kaggle. \url{http://www.kaggle.com/datasets/kevinparks/athlete-career-length}}
+
+\hypertarget{ref2}{“Basketball Reference” (2025). \textit{Basketball Statistics \& History of every Team \& NBA and WNBA players}. \url{https://www.basketball-reference.com/}}
